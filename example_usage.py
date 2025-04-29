@@ -9,6 +9,13 @@ import sys
 from typing import Optional, Dict
 import shlex
 
+# Import our sudo wrapper
+try:
+    from run_with_sudo import run_docker_cmd
+except ImportError:
+    run_docker_cmd = None
+    print("Note: run_with_sudo.py not found. Docker permissions will not be automatically handled.")
+
 # Only import SSHClient if not running locally
 # from paramiko import AutoAddPolicy, SSHClient 
 
@@ -63,7 +70,7 @@ logger = logging.getLogger("example_usage")
 
 # --- Refactored Example Functions ---
 
-async def manage_container(local=False, container_type='basic', image_name=None, ssh_client=None, setup_user=True):
+async def manage_container(local=False, container_type='basic', image_name=None, ssh_client=None, setup_user=True, force_gpu=False):
     """
     Create and manage a container based on the given profile.
     
@@ -73,6 +80,7 @@ async def manage_container(local=False, container_type='basic', image_name=None,
         image_name: Docker image to use (overrides defaults for the container type)
         ssh_client: Optional SSHClient for remote operations
         setup_user: Whether to set up a 'pod-user' in the container
+        force_gpu: Whether to force GPU support regardless of toolkit detection
         
     Returns:
         Container info object if successful, None otherwise
@@ -89,6 +97,40 @@ async def manage_container(local=False, container_type='basic', image_name=None,
             logger.info(f"[{manager.context}] GPU detected: {gpu_info.get('count')} x {', '.join(gpu_info.get('types', ['Unknown']))}")
             logger.info(f"[{manager.context}] NVIDIA drivers installed: {gpu_info.get('has_drivers', False)}")
             logger.info(f"[{manager.context}] NVIDIA container toolkit installed: {gpu_info.get('has_toolkit', False)}")
+            
+            # Force toolkit installation if GPU is detected but toolkit is missing
+            if not gpu_info.get('has_toolkit', False):
+                logger.info(f"[{manager.context}] NVIDIA Container Toolkit missing, attempting installation...")
+                try:
+                    # Direct installation commands to ensure proper toolkit setup
+                    if not manager.ssh_client:  # Local
+                        install_cmd = """
+                        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && 
+                        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | 
+                        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | 
+                        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list && 
+                        sudo apt-get update && 
+                        sudo apt-get install -y nvidia-container-toolkit
+                        """
+                        os.system(install_cmd)
+                        # Set toolkit as installed if we get this far
+                        gpu_info["has_toolkit"] = True
+                    else:  # Remote
+                        # Similar commands but executed through SSH
+                        install_cmd = """
+                        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && 
+                        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | 
+                        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | 
+                        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list && 
+                        sudo apt-get update && 
+                        sudo apt-get install -y nvidia-container-toolkit
+                        """
+                        stdin, stdout, stderr = manager.ssh_client.exec_command(f"bash -c '{install_cmd}'")
+                        exit_status = stdout.channel.recv_exit_status()
+                        if exit_status == 0:
+                            gpu_info["has_toolkit"] = True
+                except Exception as e:
+                    logger.error(f"[{manager.context}] Manual toolkit installation failed: {str(e)}")
         else:
             logger.info(f"[{manager.context}] No compatible GPU hardware detected")
     except Exception as e:
@@ -97,35 +139,89 @@ async def manage_container(local=False, container_type='basic', image_name=None,
     
     # Set container configuration based on type and GPU availability
     enable_gpu = False
+    dind_enabled = False
+    mount_docker_socket = False
+    volumes = None
+    docker_setup_script = None
+    
     if container_type == 'gpu':
         # For GPU containers, always try to enable GPU
         enable_gpu = has_gpu and gpu_info.get("has_drivers", False)
+        if force_gpu and has_gpu:
+            # Force GPU if requested and hardware is available
+            enable_gpu = True
+            logger.info(f"[{manager.context}] Forcing GPU support as requested by --force-gpu flag")
         if not enable_gpu:
             logger.warning(f"[{manager.context}] GPU container requested but no GPU/drivers detected. Container will be created without GPU access.")
         if not image_name:
-            image_name = "nvidia/cuda:11.7.1-base-ubuntu22.04"
+            image_name = "docker.io/nvidia/cuda:11.7.1-base-ubuntu22.04"
     elif container_type == 'dind':
         # Docker-in-Docker container (explicitly disable GPU for DinD containers)
         enable_gpu = False
+        dind_enabled = True
         if not image_name:
             image_name = "docker:dind"
+    elif container_type == 'gpu-docker':
+        # GPU + Docker CLI container (best of both worlds)
+        enable_gpu = has_gpu and gpu_info.get("has_drivers", False)
+        if not enable_gpu:
+            logger.warning(f"[{manager.context}] GPU requested but not detected. Container will be created without GPU access.")
+        mount_docker_socket = True
+        if not image_name:
+            image_name = "docker.io/nvidia/cuda:11.7.1-base-ubuntu22.04"
+        # Prepare volumes with Docker socket mount
+        volumes = {"/var/run/docker.sock": "/var/run/docker.sock"}
+        # Script to set up Docker CLI inside the container
+        docker_setup_script = """
+        apt-get update && \
+        apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release && \
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list && \
+        apt-get update && \
+        apt-get install -y docker-ce-cli && \
+        echo "Docker CLI installed successfully. You can now use docker commands inside this container."
+        """
     else:
         # Basic container - enable GPU if available
         enable_gpu = has_gpu and gpu_info.get("has_drivers", False)
         if not image_name:
             # Select image based on GPU availability
-            image_name = "nvidia/cuda:11.7.1-base-ubuntu22.04" if enable_gpu else "ubuntu:latest"
+            image_name = "docker.io/nvidia/cuda:11.7.1-base-ubuntu22.04" if enable_gpu else "docker.io/ubuntu:latest"
     
-    logger.info(f"[{manager.context}] Creating container with image: {image_name}, GPU enabled: {enable_gpu}")
+    # Check if we're using Podman instead of Docker
+    is_podman = False
+    try:
+        check_cmd = "docker --version"
+        if not manager.ssh_client:  # Local
+            result = os.popen(check_cmd).read().strip()
+            is_podman = 'podman' in result.lower() if result else False
+        else:
+            stdin, stdout, stderr = manager.ssh_client.exec_command(check_cmd)
+            result = stdout.read().decode('utf-8').strip()
+            is_podman = 'podman' in result.lower() if result else False
+            
+        if is_podman and enable_gpu:
+            logger.info(f"[{manager.context}] Detected Podman with GPU support - will use special options")
+    except Exception as e:
+        logger.warning(f"[{manager.context}] Could not determine container runtime: {str(e)}")
     
+    logger.info(f"[{manager.context}] Creating container with image: {image_name}, GPU enabled: {enable_gpu}, Docker socket mount: {mount_docker_socket}")
+    
+    # Ensure image name is fully qualified if it might be unqualified
+    if '/' in image_name and '.' not in image_name.split('/')[0]:
+        # Basic check: if there's a slash but no dot in the first part, assume it needs docker.io prefix
+        if not image_name.startswith("docker.io/"):
+            logger.info(f"[{manager.context}] Prepending 'docker.io/' to image name: {image_name}")
+            image_name = f"docker.io/{image_name}"
+            
     # Create the container
     container_info = await manager.create_container(
         image=image_name,
         ports={"80": None},  # Map container port 80 to dynamic host port
-        volumes=None,
+        volumes=volumes,
         environment={"CONTAINER_TYPE": container_type},
         enable_gpu=enable_gpu,
-        dind_enabled=(container_type == 'dind')
+        dind_enabled=dind_enabled
     )
     
     if container_info:
@@ -134,13 +230,53 @@ async def manage_container(local=False, container_type='basic', image_name=None,
         logger.info(f"[{manager.context}] Container Name: {container_info.container_name}")
         logger.info(f"[{manager.context}] Port Mappings: {container_info.ports}")
         
+        # If this is a gpu-docker container, set up Docker CLI
+        if container_type == 'gpu-docker' and docker_setup_script and container_info.status.lower() == "running":
+            logger.info(f"[{manager.context}] Setting up Docker CLI inside gpu-docker container...")
+            setup_cmd = f"exec {shlex.quote(container_info.container_id)} bash -c {shlex.quote(docker_setup_script)}"
+            docker_setup_status, docker_setup_output, docker_setup_error = await manager._run_docker_command(setup_cmd)
+            
+            if docker_setup_status == 0:
+                logger.info(f"[{manager.context}] Docker CLI setup completed successfully in container.")
+            else:
+                logger.error(f"[{manager.context}] Docker CLI setup failed: {docker_setup_error}")
+                logger.error(f"[{manager.context}] Output: {docker_setup_output}")
+        
         # Verify GPU access if enabled
-        if enable_gpu and container_info.gpu_enabled and container_info.status.lower() == "running":
+        if enable_gpu and container_info.status.lower() == "running":
             logger.info(f"[{manager.context}] Verifying GPU access in container...")
             
+            # Check if we're using Podman instead of Docker
+            try:
+                check_cmd = "docker --version"
+                if manager.ssh_client:
+                    stdin, stdout, stderr = manager.ssh_client.exec_command(check_cmd)
+                    result = stdout.read().decode('utf-8').strip()
+                else:
+                    result = os.popen(check_cmd).read().strip()
+                
+                is_podman = 'podman' in result.lower() if result else False
+                
+                if is_podman:
+                    logger.info(f"[{manager.context}] Detected Podman being used instead of Docker")
+                    # Force GPU support for Podman if hardware is detected
+                    container_info.gpu_enabled = True
+                    logger.info(f"[{manager.context}] Explicitly enabling GPU for Podman container")
+            except Exception as e:
+                logger.warning(f"[{manager.context}] Could not determine container runtime: {str(e)}")
+            
             # Run nvidia-smi in container (installation should have been done during container creation)
+            # Use sudo if needed
             verify_cmd = f"exec {shlex.quote(container_info.container_id)} nvidia-smi"
-            exit_status, output, error = await manager._run_docker_command(verify_cmd)
+            try:
+                exit_status, output, error = await manager._run_docker_command(verify_cmd)
+                if exit_status != 0 and "permission denied" in error.lower():
+                    logger.warning(f"[{manager.context}] Permission denied, trying with sudo...")
+                    sudo_verify_cmd = f"sudo docker {verify_cmd}"
+                    exit_status, output, error = await manager._run_local_command(sudo_verify_cmd)
+            except Exception as e:
+                logger.error(f"[{manager.context}] Error running verification command: {str(e)}")
+                exit_status, output, error = 1, "", str(e)
             
             if exit_status == 0:
                 logger.info(f"[{manager.context}] ✅ GPU access verified successfully!")
@@ -207,12 +343,13 @@ async def main():
     container_group = parser.add_argument_group('Container Configuration')
     container_group.add_argument(
         "--type", 
-        choices=["basic", "gpu", "dind"], 
+        choices=["basic", "gpu", "dind", "gpu-docker"], 
         default="basic", 
         help="Type of container configuration profile."
     )
     container_group.add_argument("--image", help="Override default Docker image for the chosen type.")
     container_group.add_argument("--name", help="Specify a custom name for the container.")
+    container_group.add_argument("--force-gpu", action="store_true", help="Force GPU support regardless of toolkit detection.")
     # Add more args for ports, volumes, env vars if needed, or use a config file approach
     
     args = parser.parse_args()
@@ -255,7 +392,8 @@ async def main():
               container_type=args.type,
               image_name=args.image,
               ssh_client=ssh_client,
-              setup_user=True
+              setup_user=True,
+              force_gpu=args.force_gpu
          )
     finally:
          # Close SSH connection if it was opened

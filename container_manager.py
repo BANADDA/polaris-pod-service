@@ -144,7 +144,7 @@ class ContainerManager:
     async def _run_docker_command(self, command: str) -> Tuple[int, str, str]:
         """Helper to prefix commands with 'docker' and run them."""
         return await self._run_command(f"docker {command}")
-
+        
     async def create_container(self, 
                               image: str,
                               container_name: Optional[str] = None,
@@ -282,10 +282,9 @@ class ContainerManager:
             # Add the image
             run_cmd_parts.append(shlex.quote(image))
 
-            # Add a keep-alive command for basic images like ubuntu
-            # A more robust solution might check the image's default CMD/ENTRYPOINT
-            # Check if image name starts with known base images that need keep-alive
-            if image.startswith("ubuntu") or image.startswith("nvidia/cuda"): 
+            # Add a keep-alive command for basic images that might exit immediately
+            # Check if image name contains known base image names that need keep-alive
+            if any(base in image for base in ["ubuntu", "nvidia/cuda", "docker:"]): 
                 logger.info(f"[{self.context}] Adding 'tail -f /dev/null' to keep basic container running for image '{image}'.")
                 run_cmd_parts.extend(["tail", "-f", "/dev/null"])
             
@@ -387,7 +386,7 @@ class ContainerManager:
         except Exception as e:
             logger.error(f"[{self.context}] Unexpected error during container creation: {str(e)}", exc_info=True)
             return None
-
+    
     async def _install_nvidia_tools_in_container(self, container_id: str) -> bool:
         """
         Install NVIDIA tools (including nvidia-smi) inside a GPU-enabled container.
@@ -559,7 +558,7 @@ class ContainerManager:
         except Exception as e:
             logger.error(f"[{self.context}] Unexpected error setting up user in container: {str(e)}", exc_info=True)
             return False
-
+    
     async def check_container_status(self, container_id: str) -> Tuple[bool, str]:
         """
         Check if a container is running.
@@ -567,7 +566,7 @@ class ContainerManager:
         
         Args:
             container_id: Container ID or name
-
+            
         Returns:
             Tuple of (is_running, status_string)
         """
@@ -594,7 +593,7 @@ class ContainerManager:
         except Exception as e:
             logger.error(f"[{self.context}] Unexpected error checking container status: {str(e)}", exc_info=True)
             return False, "error"
-
+    
     async def stop_container(self, 
                            container_id: str,
                            timeout: int = 10) -> bool:
@@ -605,7 +604,7 @@ class ContainerManager:
         Args:
             container_id: Container ID or name
             timeout: Seconds to wait for stop before killing.
-
+            
         Returns:
             Boolean indicating success
         """
@@ -627,7 +626,7 @@ class ContainerManager:
                     return True # Considered success if already stopped
                 else:
                     logger.error(f"[{self.context}] Error stopping container {container_id[:12]}: {error}")
-                    return False
+                return False
             
             stopped_id = output.strip()
             logger.info(f"[{self.context}] Container {stopped_id[:12]} stopped successfully.")
@@ -644,7 +643,7 @@ class ContainerManager:
         except Exception as e:
             logger.error(f"[{self.context}] Unexpected error stopping container: {str(e)}", exc_info=True)
             return False
-
+    
     async def remove_container(self, 
                              container_id: str,
                              force: bool = False) -> bool:
@@ -655,7 +654,7 @@ class ContainerManager:
         Args:
             container_id: Container ID or name
             force: Whether to force removal of a running container.
-
+            
         Returns:
             Boolean indicating success
         """
@@ -686,7 +685,7 @@ class ContainerManager:
                      return True # Considered success
                 else:
                      logger.error(f"[{self.context}] Error removing container {container_id[:12]}: {error}")
-                     return False
+                return False
             
             removed_id = output.strip()
             logger.info(f"[{self.context}] Container {removed_id[:12]} removed successfully.")

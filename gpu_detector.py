@@ -210,6 +210,7 @@ class GPUDetector:
         
         # Helper to run setup commands with sudo if needed
         async def run_setup_command(cmd: str, check_sudo: bool = True) -> Tuple[int, str, str]:
+            target_cmd = cmd # Command to be executed
             use_sudo = False
             if check_sudo:
                  # Check if sudo is available and needed (only check locally if needed)
@@ -230,11 +231,19 @@ class GPUDetector:
                         use_sudo = True
 
             if use_sudo:
-                # Escape single quotes for bash -c wrapper
-                escaped_cmd = cmd.replace("'", "'\\\\''") 
-                cmd = f"sudo bash -c '{escaped_cmd}'"
+                # For commands that modify files directly (sed -i) or use redirection (>)
+                # avoid wrapping in `bash -c` as it complicates quoting and permissions.
+                # Run them directly with sudo if possible.
+                # Note: This assumes the user running the script has passwordless sudo access
+                # for these specific commands, or sudo is configured system-wide.
+                if "sed -i" in cmd or " > " in cmd or " | tee " in cmd or "mv /tmp/" in cmd:
+                    target_cmd = f"sudo {cmd}"
+                else:
+                    # For other commands, wrap in bash -c for potentially complex chains
+                    escaped_cmd = cmd.replace("'", "'\\\\''") 
+                    target_cmd = f"sudo bash -c '{escaped_cmd}'"
                 
-            return await _run_command(ssh_client, cmd)
+            return await _run_command(ssh_client, target_cmd)
 
         try:
             # First check for distribution
@@ -254,9 +263,14 @@ class GPUDetector:
                     "export DEBIAN_FRONTEND=noninteractive",
                     "apt-get update",
                     "apt-get install -y curl ca-certificates gnupg",
-                    "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg",
-                    # Need to handle potential differences in shell expansion locally vs SSH if distro var was used
-                    f"curl -s -L https://nvidia.github.io/libnvidia-container/{distro}/libnvidia-container.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' > /etc/apt/sources.list.d/nvidia-container-toolkit.list",
+                    # Add --yes to gpg to overwrite without prompting
+                    "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg",
+                    # Use a temporary file, add curl -f to fail on server error, and verify content
+                    f"curl -fsSL https://nvidia.github.io/libnvidia-container/{distro}/libnvidia-container.list -o /tmp/nvidia-container-toolkit.list",
+                    # Verify downloaded file looks like a deb source list before proceeding
+                    "grep -q '^deb ' /tmp/nvidia-container-toolkit.list || (echo 'ERROR: Downloaded nvidia source list is invalid!' && exit 1)",
+                    "sed -i 's|deb https://|deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://|g' /tmp/nvidia-container-toolkit.list",
+                    "mv /tmp/nvidia-container-toolkit.list /etc/apt/sources.list.d/nvidia-container-toolkit.list",
                     "apt-get update",
                     "apt-get install -y nvidia-container-toolkit",
                     "nvidia-ctk runtime configure --runtime=docker",
