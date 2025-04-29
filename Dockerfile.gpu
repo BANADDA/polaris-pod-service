@@ -1,0 +1,37 @@
+# Base image with NVIDIA CUDA support
+FROM nvidia/cuda:12.1.1-base-ubuntu22.04
+
+# Avoid prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base dependencies and common tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sudo \
+    mosh \
+    curl \
+    git \
+    vim \
+    procps \
+    net-tools \
+    ca-certificates \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user 'pod-user' with user ID 1000
+# Give passwordless sudo privileges
+RUN useradd -m -u 1000 -s /bin/bash pod-user && \
+    echo "pod-user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/pod-user && \
+    chmod 0440 /etc/sudoers.d/pod-user
+
+# Ensure NVIDIA libraries are found
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Set working directory
+WORKDIR /home/pod-user
+
+# Switch to the non-root user
+USER pod-user
+
+# Default command to start an interactive bash shell
+CMD ["/bin/bash"] 

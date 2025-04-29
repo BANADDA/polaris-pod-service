@@ -1,65 +1,70 @@
- # Container Manager for GPU and Rootless Docker Support
+# Polaris Pod Service - Pre-built Containers
 
-This module provides a comprehensive solution for creating and managing Docker containers on remote machines, with robust support for:
+This project provides pre-built Docker containers optimized for CPU and NVIDIA GPU workloads, simplifying the setup process.
 
-1.  **GPU Detection & Passthrough**: Automatically detects NVIDIA GPUs and enables them for containers when available.
-2.  **Rootless Docker Operation**: Sets up and uses rootless Docker to avoid sudo permission issues.
-3.  **Docker-in-Docker (DinD)**: Supports running Docker inside containers.
-4.  **Smart Port Mapping**: Handles port mappings.
-5.  **User Setup**: Creates a non-root user (`pod-user`) with passwordless sudo and necessary package installations (including `mosh`) inside the container.
+## Features
 
-## Key Components
-
--   **`ContainerManager`**: Main class for creating and managing containers.
--   **`GPUDetector`**: Detects and sets up NVIDIA GPU support.
--   **`RootlessDockerSetup`**: Handles rootless Docker setup and operation.
-
-## Error Handling
-
-The container manager includes comprehensive error handling and logging throughout, making it easy to diagnose issues that may arise during container operations.
-
-## Automatic Recovery
-
-The container manager can automatically:
-
-1.  Detect and install NVIDIA GPU drivers and toolkit if needed
-2.  Set up rootless Docker if it's not already configured
-3.  Fall back to regular Docker with sudo if rootless setup fails
-4.  Safely handle Docker command errors with detailed logging
+*   **Pre-built Images:** Ready-to-use images hosted on Docker Hub (`mubarakb1999/polaris-pod`).
+*   **CPU & GPU Versions:** Separate images (`:cpu`, `:gpu`) tailored for specific hardware.
+*   **Standardized Environment:** Includes Ubuntu 22.04 base, common utilities (`git`, `curl`, `vim`, `mosh`, etc.), and a `pod-user` with passwordless `sudo`.
+*   **Simple Launch Script:** `usage.py` script to easily run containers with common Docker options.
 
 ## Prerequisites
 
--   Python 3.7+
--   `paramiko` library
--   Docker installed on the remote machine (or will attempt to install it)
--   For GPU support: NVIDIA GPU with compatible drivers (or will attempt to install them)
+*   **Docker:** Docker must be installed and running on your local machine.
+*   **Python:** Python 3.7+ (for running the `usage.py` script).
+*   **(GPU Version Only):** NVIDIA GPU with compatible drivers installed on the host machine. The NVIDIA Container Toolkit is also recommended.
 
-## Usage (`usage.py`)
+## Quick Start (`usage.py`)
 
-The `usage.py` script demonstrates how to use the `ContainerManager` to create containers locally or remotely.
+The `usage.py` script pulls the appropriate image from Docker Hub and runs it using `docker run`.
 
-**Example (Local GPU Container):**
+**Basic Usage:**
 
-To run a local container with GPU support using a specific Docker image (e.g., `nvidia/cuda:11.7.1-base-ubuntu22.04`), use the following command:
+*   **Run CPU container:**
+    ```bash
+    python usage.py --type cpu
+    ```
+*   **Run GPU container:**
+    ```bash
+    python usage.py --type gpu
+    ```
+
+**Common Options:**
+
+The script passes common flags directly to `docker run`:
+
+*   `--name <container_name>`: Assign a specific name to the container.
+*   `-v /host/path:/container/path`: Mount a volume from the host into the container.
+*   `-p host_port:container_port`: Map a port from the host to the container.
+*   `--env VAR=value`: Set environment variables inside the container.
+*   `--add-host hostname:ip`: Add custom host mappings.
+
+**Example (GPU container with volume and port mapping):**
 
 ```bash
-python usage.py --local --type gpu-docker --image nvidia/cuda:11.7.1-base-ubuntu22.04
+python usage.py --type gpu --name my-gpu-pod -v ~/my_data:/data -p 8080:80
 ```
-
-**Flags:**
-
-*   `--local`: Run the container on the local machine instead of a remote SSH host.
-*   `--type`: Specifies the type of container environment.
-    *   `gpu-docker`: Creates a container with NVIDIA GPU access and Docker-in-Docker capabilities.
-    *   `rootless-docker`: Creates a container using rootless Docker.
-    *   `base`: Creates a basic container without special Docker configurations.
-*   `--image`: (Optional) Specify the Docker image to use. Defaults may apply if not provided.
 
 **Output:**
 
-The script will output logs detailing the process, including GPU detection, container creation, and setup steps. Upon successful creation, it will provide the container ID, name, port mappings, and the command to access the container shell:
+The script will output logs, the container ID, the container name, and the command needed to access the container's shell:
 
-```bash
-# Example output log message
-[INFO] - example_usage - [Local] To access the container: docker exec -it <container_id> bash
-``` 
+```log
+INFO:usage_simplified:Container started successfully!
+INFO:usage_simplified:Container ID: a1b2c3d4e5f6...
+INFO:usage_simplified:Container Name: my-gpu-pod
+INFO:usage_simplified:To access the container shell: docker exec -it my-gpu-pod bash
+```
+
+## Building Images Locally (Optional)
+
+If you need to customize the images, you can build them locally:
+
+1.  Modify `Dockerfile.cpu` or `Dockerfile.gpu` as needed.
+2.  Build the images:
+    ```bash
+    docker build -t your-tag:cpu -f Dockerfile.cpu .
+    docker build -t your-tag:gpu -f Dockerfile.gpu .
+    ```
+3.  Update `usage.py` to use `your-tag` instead of `mubarakb1999/polaris-pod` if you want the script to use your local builds. 
