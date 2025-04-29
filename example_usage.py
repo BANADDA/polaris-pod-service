@@ -1,411 +1,271 @@
 """
-Example usage of the Container Manager
+Example usage of the Container Manager for local or remote execution.
 """
 import argparse
 import asyncio
 import logging
 import os
 import sys
+from typing import Optional, Dict
+import shlex
 
-from paramiko import AutoAddPolicy, SSHClient
+# Only import SSHClient if not running locally
+# from paramiko import AutoAddPolicy, SSHClient 
 
-# Add the project root to path for imports
-script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(script_dir, "..", "..", ".."))
-sys.path.insert(0, project_root)
+# Add project root to sys.path to find container_manager module
+# Adjust the path separators and number of ".." if necessary based on your structure
+try:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Assuming example_usage.py is in the root or a known location relative to src
+    # If example_usage.py is in root: go into src/miners/container_manager
+    # project_root = os.path.abspath(os.path.join(script_dir, "src")) 
+    # If example_usage.py is inside src/miners/container_manager: go up 3 levels
+    project_root = os.path.abspath(os.path.join(script_dir, "..", "..")) 
+    src_root = os.path.abspath(os.path.join(script_dir, "..", "..")) # Assuming src is one level up
+    # Check if the calculated path is reasonable
+    # if "container_manager" not in os.listdir(os.path.join(project_root, "container_manager")):
+    #      print(f"Warning: Could not auto-detect project structure reliably from {script_dir}.")
+    #      print(f"Calculated project_root: {project_root}")
+    #      print(f"Make sure container_manager is importable.")
+    
+    # Use src_root if seems more appropriate based on typical structure
+    if os.path.basename(src_root) == 'src':
+         sys.path.insert(0, src_root)
+         print(f"Adding {src_root} to sys.path")
+    elif os.path.basename(project_root) == 'polaris-pod-service': # Check if parent is workspace root
+         sys.path.insert(0, project_root)
+         print(f"Adding {project_root} to sys.path")
+    else:
+         # Fallback or adjust based on actual structure
+         sys.path.insert(0, script_dir) 
+         print(f"Adding {script_dir} to sys.path as fallback.")
+         
+    from container_manager import ContainerManager, GPUDetector # Adjusted import path
+    from paramiko import AutoAddPolicy, SSHClient # Keep import for type hinting and conditional use
+except ImportError as e:
+    print(f"Error importing ContainerManager: {e}")
+    print(f"Current sys.path: {sys.path}")
+    print("Ensure the script is run from the correct directory or project structure is correct.")
+    sys.exit(1)
+except FileNotFoundError:
+    print("Error determining script path or project structure.")
+    sys.exit(1)
 
-from src.miners.container_manager.container_manager import ContainerManager
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - [%(levelname)s] - %(name)s - %(message)s' # Added levelname
 )
-logger = logging.getLogger(__name__)
+# Suppress overly verbose paramiko logs if desired
+# logging.getLogger("paramiko").setLevel(logging.WARNING)
+logger = logging.getLogger("example_usage")
 
-async def create_basic_container(
-    host: str, 
-    username: str, 
-    password: str = None, 
-    key_path: str = None, 
-    image: str = "ubuntu:latest"
-):
+# --- Refactored Example Functions ---
+
+async def manage_container(local=False, container_type='basic', image_name=None, ssh_client=None, setup_user=True):
     """
-    Create a basic container without GPU support.
+    Create and manage a container based on the given profile.
     
     Args:
-        host: SSH host to connect to
-        username: SSH username
-        password: SSH password (optional)
-        key_path: Path to SSH private key file (optional)
-        image: Docker image to use
+        local: Whether to run container operations locally (True) or via SSH (False)
+        container_type: Type of container to create ('basic', 'gpu', 'dind')
+        image_name: Docker image to use (overrides defaults for the container type)
+        ssh_client: Optional SSHClient for remote operations
+        setup_user: Whether to set up a 'pod-user' in the container
+        
+    Returns:
+        Container info object if successful, None otherwise
     """
-    logger.info(f"Creating basic container on {host} using image {image}")
+    # Create the container manager
+    manager = ContainerManager(ssh_client=ssh_client)
     
-    # Setup SSH connection
-    ssh_client = SSHClient()
-    ssh_client.set_missing_host_key_policy(AutoAddPolicy())
-    
+    # Perform GPU detection
+    gpu_info = {"has_gpu": False, "count": 0, "types": [], "has_toolkit": False}
     try:
-        if key_path:
-            ssh_client.connect(host, username=username, key_filename=key_path)
+        logger.info(f"[{manager.context}] Checking for GPU hardware and drivers...")
+        has_gpu, gpu_info = await GPUDetector.detect_nvidia_gpu(manager.ssh_client)
+        if has_gpu:
+            logger.info(f"[{manager.context}] GPU detected: {gpu_info.get('count')} x {', '.join(gpu_info.get('types', ['Unknown']))}")
+            logger.info(f"[{manager.context}] NVIDIA drivers installed: {gpu_info.get('has_drivers', False)}")
+            logger.info(f"[{manager.context}] NVIDIA container toolkit installed: {gpu_info.get('has_toolkit', False)}")
         else:
-            ssh_client.connect(host, username=username, password=password)
-            
-        logger.info(f"Connected to {host} as {username}")
-        
-        # Create container manager
-        manager = ContainerManager()
-        
-        # Create a basic container
-        container_info = await manager.create_container(
-            ssh_client=ssh_client,
-            image=image,
-            ports={"80": "8080"},  # Map container port 80 to host port 8080
-            environment={"CONTAINER_TYPE": "basic"},
-            rootless=True,  # Use rootless Docker if possible
-            use_sudo=True,  # Use sudo as fallback
-            dind_enabled=False
-        )
-        
-        if container_info:
-            logger.info(f"Container created successfully:")
-            logger.info(f"  Container ID: {container_info.container_id}")
-            logger.info(f"  Container Name: {container_info.container_name}")
-            logger.info(f"  Image: {container_info.image}")
-            logger.info(f"  Ports: {container_info.ports}")
-            logger.info(f"  Status: {container_info.status}")
-            
-            # Check container status
-            is_running, status = await manager.check_container_status(
-                ssh_client=ssh_client,
-                container_id=container_info.container_id,
-                rootless=True,
-                use_sudo=True
-            )
-            
-            logger.info(f"Container is running: {is_running}, Status: {status}")
-            
-            # Setup pod-user in the container
-            user_setup = await manager.setup_pod_user(
-                ssh_client=ssh_client,
-                container_id=container_info.container_id,
-                username="pod-user",
-                rootless=True,
-                use_sudo=True
-            )
-            
-            if user_setup:
-                logger.info(f"User 'pod-user' set up successfully in container {container_info.container_id}")
-            else:
-                logger.error(f"Failed to set up 'pod-user' in container {container_info.container_id}")
-            
-            # Ask if we should stop and remove the container
-            if input("Stop and remove container? (y/n): ").lower() == 'y':
-                stopped = await manager.stop_container(
-                    ssh_client=ssh_client,
-                    container_id=container_info.container_id,
-                    rootless=True,
-                    use_sudo=True
-                )
-                
-                if stopped:
-                    logger.info(f"Container {container_info.container_id} stopped")
-                    
-                    removed = await manager.remove_container(
-                        ssh_client=ssh_client,
-                        container_id=container_info.container_id,
-                        force=True,
-                        rootless=True,
-                        use_sudo=True
-                    )
-                    
-                    if removed:
-                        logger.info(f"Container {container_info.container_id} removed")
-                    else:
-                        logger.error(f"Failed to remove container {container_info.container_id}")
-                else:
-                    logger.error(f"Failed to stop container {container_info.container_id}")
-        else:
-            logger.error("Failed to create container")
-    
+            logger.info(f"[{manager.context}] No compatible GPU hardware detected")
     except Exception as e:
-        logger.error(f"Error creating container: {str(e)}", exc_info=True)
-    finally:
-        ssh_client.close()
-        logger.info("SSH connection closed")
-
-async def create_gpu_container(
-    host: str, 
-    username: str, 
-    password: str = None, 
-    key_path: str = None, 
-    image: str = "nvidia/cuda:11.7.1-base-ubuntu22.04"
-):
-    """
-    Create a container with GPU support if available.
+        logger.error(f"[{manager.context}] Error during GPU detection: {str(e)}")
+        has_gpu = False
     
-    Args:
-        host: SSH host to connect to
-        username: SSH username
-        password: SSH password (optional)
-        key_path: Path to SSH private key file (optional)
-        image: Docker image to use
-    """
-    logger.info(f"Creating GPU container on {host} using image {image}")
+    # Set container configuration based on type and GPU availability
+    enable_gpu = False
+    if container_type == 'gpu':
+        # For GPU containers, always try to enable GPU
+        enable_gpu = has_gpu and gpu_info.get("has_drivers", False)
+        if not enable_gpu:
+            logger.warning(f"[{manager.context}] GPU container requested but no GPU/drivers detected. Container will be created without GPU access.")
+        if not image_name:
+            image_name = "nvidia/cuda:11.7.1-base-ubuntu22.04"
+    elif container_type == 'dind':
+        # Docker-in-Docker container (explicitly disable GPU for DinD containers)
+        enable_gpu = False
+        if not image_name:
+            image_name = "docker:dind"
+    else:
+        # Basic container - enable GPU if available
+        enable_gpu = has_gpu and gpu_info.get("has_drivers", False)
+        if not image_name:
+            # Select image based on GPU availability
+            image_name = "nvidia/cuda:11.7.1-base-ubuntu22.04" if enable_gpu else "ubuntu:latest"
     
-    # Setup SSH connection
-    ssh_client = SSHClient()
-    ssh_client.set_missing_host_key_policy(AutoAddPolicy())
+    logger.info(f"[{manager.context}] Creating container with image: {image_name}, GPU enabled: {enable_gpu}")
     
-    try:
-        if key_path:
-            ssh_client.connect(host, username=username, key_filename=key_path)
-        else:
-            ssh_client.connect(host, username=username, password=password)
+    # Create the container
+    container_info = await manager.create_container(
+        image=image_name,
+        ports={"80": None},  # Map container port 80 to dynamic host port
+        volumes=None,
+        environment={"CONTAINER_TYPE": container_type},
+        enable_gpu=enable_gpu,
+        dind_enabled=(container_type == 'dind')
+    )
+    
+    if container_info:
+        logger.info(f"[{manager.context}] Container created successfully!")
+        logger.info(f"[{manager.context}] Container ID: {container_info.container_id}")
+        logger.info(f"[{manager.context}] Container Name: {container_info.container_name}")
+        logger.info(f"[{manager.context}] Port Mappings: {container_info.ports}")
+        
+        # Verify GPU access if enabled
+        if enable_gpu and container_info.gpu_enabled and container_info.status.lower() == "running":
+            logger.info(f"[{manager.context}] Verifying GPU access in container...")
             
-        logger.info(f"Connected to {host} as {username}")
-        
-        # Create container manager
-        manager = ContainerManager()
-        
-        # Create a container with GPU support
-        container_info = await manager.create_container(
-            ssh_client=ssh_client,
-            image=image,
-            ports={"8000": "8000"},
-            environment={"CONTAINER_TYPE": "gpu"},
-            enable_gpu=True,  # Enable GPU support if available
-            memory_limit="4g",
-            cpu_limit="2",
-            rootless=True,
-            use_sudo=True
-        )
-        
-        if container_info:
-            logger.info(f"Container created successfully:")
-            logger.info(f"  Container ID: {container_info.container_id}")
-            logger.info(f"  Container Name: {container_info.container_name}")
-            logger.info(f"  Image: {container_info.image}")
-            logger.info(f"  Ports: {container_info.ports}")
-            logger.info(f"  GPU Enabled: {container_info.gpu_enabled}")
+            # Run nvidia-smi in container (installation should have been done during container creation)
+            verify_cmd = f"exec {shlex.quote(container_info.container_id)} nvidia-smi"
+            exit_status, output, error = await manager._run_docker_command(verify_cmd)
             
-            if container_info.gpu_enabled:
-                logger.info(f"  GPU Count: {container_info.gpu_count}")
-                logger.info(f"  GPU Type: {container_info.gpu_type}")
+            if exit_status == 0:
+                logger.info(f"[{manager.context}] ✅ GPU access verified successfully!")
+                # Print a formatted version of the output
+                for line in output.splitlines():
+                    if line.strip():
+                        logger.info(f"  {line.strip()}")
+            else:
+                logger.warning(f"[{manager.context}] ❌ GPU access verification failed: {error}")
+                logger.info(f"[{manager.context}] Attempting to install nvidia-smi manually...")
                 
-            # Execute a command to verify GPU access
-            if container_info.gpu_enabled:
-                exec_cmd = "nvidia-smi"
-                logger.info(f"Executing '{exec_cmd}' in container to verify GPU access")
-                
-                if True:  # Using rootless Docker
-                    exit_status, output, error = await manager.RootlessDockerSetup.run_docker_command(
-                        ssh_client=ssh_client,
-                        command=f"exec {container_info.container_id} {exec_cmd}",
-                        use_sudo=True
-                    )
-                else:
-                    exec_full_cmd = f"docker exec {container_info.container_id} {exec_cmd}"
-                    # Use sudo if needed
-                    if True:  # Using sudo
-                        exec_full_cmd = f"sudo {exec_full_cmd}"
-                    
-                    stdin, stdout, stderr = ssh_client.exec_command(exec_full_cmd)
-                    exit_status = stdout.channel.recv_exit_status()
-                    output = stdout.read().decode().strip()
-                    error = stderr.read().decode().strip()
+                # Try to install nvidia-utils package
+                install_cmd = f"exec {shlex.quote(container_info.container_id)} bash -c 'apt-get update && apt-get install -y nvidia-utils-525 || apt-get install -y nvidia-utils-520 || apt-get install -y nvidia-utils-515'"
+                exit_status, output, error = await manager._run_docker_command(install_cmd)
                 
                 if exit_status == 0:
-                    logger.info(f"GPU check successful:")
-                    logger.info(output[:500] + ("..." if len(output) > 500 else ""))
-                else:
-                    logger.error(f"GPU check failed: {error}")
-            
-            # Ask if we should stop and remove the container
-            if input("Stop and remove container? (y/n): ").lower() == 'y':
-                stopped = await manager.stop_container(
-                    ssh_client=ssh_client,
-                    container_id=container_info.container_id,
-                    rootless=True,
-                    use_sudo=True
-                )
-                
-                if stopped:
-                    logger.info(f"Container {container_info.container_id} stopped")
+                    logger.info(f"[{manager.context}] Installed NVIDIA utilities, retrying verification...")
                     
-                    removed = await manager.remove_container(
-                        ssh_client=ssh_client,
-                        container_id=container_info.container_id,
-                        force=True,
-                        rootless=True,
-                        use_sudo=True
-                    )
+                    # Try verification again
+                    verify_cmd = f"exec {shlex.quote(container_info.container_id)} nvidia-smi"
+                    exit_status, output, error = await manager._run_docker_command(verify_cmd)
                     
-                    if removed:
-                        logger.info(f"Container {container_info.container_id} removed")
+                    if exit_status == 0:
+                        logger.info(f"[{manager.context}] ✅ GPU access verified after manual installation!")
+                        for line in output.splitlines():
+                            if line.strip():
+                                logger.info(f"  {line.strip()}")
                     else:
-                        logger.error(f"Failed to remove container {container_info.container_id}")
+                        logger.error(f"[{manager.context}] ❌ GPU access still not working after manual installation: {error}")
                 else:
-                    logger.error(f"Failed to stop container {container_info.container_id}")
-        else:
-            logger.error("Failed to create container")
-    
-    except Exception as e:
-        logger.error(f"Error creating container: {str(e)}", exc_info=True)
-    finally:
-        ssh_client.close()
-        logger.info("SSH connection closed")
+                    logger.error(f"[{manager.context}] Failed to install NVIDIA utilities: {error}")
+        
+        logger.info(f"[{manager.context}] Container is running and ready to use.")
+        logger.info(f"[{manager.context}] To access the container: docker exec -it {container_info.container_id} bash")
+        
+        return container_info
+    else:
+        logger.error(f"[{manager.context}] Failed to create container.")
+        return None
 
-async def create_dind_container(
-    host: str, 
-    username: str, 
-    password: str = None, 
-    key_path: str = None, 
-    image: str = "docker:dind"
-):
-    """
-    Create a Docker-in-Docker container.
-    
-    Args:
-        host: SSH host to connect to
-        username: SSH username
-        password: SSH password (optional)
-        key_path: Path to SSH private key file (optional)
-        image: Docker image to use
-    """
-    logger.info(f"Creating Docker-in-Docker container on {host} using image {image}")
-    
-    # Setup SSH connection
-    ssh_client = SSHClient()
-    ssh_client.set_missing_host_key_policy(AutoAddPolicy())
-    
-    try:
-        if key_path:
-            ssh_client.connect(host, username=username, key_filename=key_path)
-        else:
-            ssh_client.connect(host, username=username, password=password)
-            
-        logger.info(f"Connected to {host} as {username}")
-        
-        # Create container manager
-        manager = ContainerManager()
-        
-        # Create a Docker-in-Docker container
-        container_info = await manager.create_container(
-            ssh_client=ssh_client,
-            image=image,
-            ports={"2375": "2375"},
-            volumes={"/var/lib/docker-dind": "/var/lib/docker"},
-            environment={"DOCKER_TLS_CERTDIR": ""},
-            dind_enabled=True,  # Enable Docker-in-Docker
-            rootless=True,
-            use_sudo=True
-        )
-        
-        if container_info:
-            logger.info(f"DinD container created successfully:")
-            logger.info(f"  Container ID: {container_info.container_id}")
-            logger.info(f"  Container Name: {container_info.container_name}")
-            logger.info(f"  Image: {container_info.image}")
-            logger.info(f"  Ports: {container_info.ports}")
-            
-            # Setup pod-user in the container
-            user_setup = await manager.setup_pod_user(
-                ssh_client=ssh_client,
-                container_id=container_info.container_id,
-                username="pod-user",
-                rootless=True,
-                use_sudo=True
-            )
-            
-            if user_setup:
-                logger.info(f"User 'pod-user' set up successfully in container {container_info.container_id}")
-                
-                # Test Docker access within container
-                logger.info("Testing Docker access within container")
-                exec_cmd = "docker ps"
-                
-                if True:  # Using rootless Docker
-                    exit_status, output, error = await manager.RootlessDockerSetup.run_docker_command(
-                        ssh_client=ssh_client,
-                        command=f"exec {container_info.container_id} {exec_cmd}",
-                        use_sudo=True
-                    )
-                else:
-                    exec_full_cmd = f"docker exec {container_info.container_id} {exec_cmd}"
-                    # Use sudo if needed
-                    if True:  # Using sudo
-                        exec_full_cmd = f"sudo {exec_full_cmd}"
-                    
-                    stdin, stdout, stderr = ssh_client.exec_command(exec_full_cmd)
-                    exit_status = stdout.channel.recv_exit_status()
-                    output = stdout.read().decode().strip()
-                    error = stderr.read().decode().strip()
-                
-                if exit_status == 0:
-                    logger.info(f"Docker access test successful:")
-                    logger.info(output)
-                else:
-                    logger.error(f"Docker access test failed: {error}")
-            else:
-                logger.error(f"Failed to set up 'pod-user' in container {container_info.container_id}")
-            
-            # Ask if we should stop and remove the container
-            if input("Stop and remove container? (y/n): ").lower() == 'y':
-                stopped = await manager.stop_container(
-                    ssh_client=ssh_client,
-                    container_id=container_info.container_id,
-                    rootless=True,
-                    use_sudo=True
-                )
-                
-                if stopped:
-                    logger.info(f"Container {container_info.container_id} stopped")
-                    
-                    removed = await manager.remove_container(
-                        ssh_client=ssh_client,
-                        container_id=container_info.container_id,
-                        force=True,
-                        rootless=True,
-                        use_sudo=True
-                    )
-                    
-                    if removed:
-                        logger.info(f"Container {container_info.container_id} removed")
-                    else:
-                        logger.error(f"Failed to remove container {container_info.container_id}")
-                else:
-                    logger.error(f"Failed to stop container {container_info.container_id}")
-        else:
-            logger.error("Failed to create container")
-    
-    except Exception as e:
-        logger.error(f"Error creating container: {str(e)}", exc_info=True)
-    finally:
-        ssh_client.close()
-        logger.info("SSH connection closed")
+# --- Main Execution Logic ---
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Container Manager Example")
-    parser.add_argument("--host", required=True, help="SSH host to connect to")
-    parser.add_argument("--username", required=True, help="SSH username")
-    parser.add_argument("--password", help="SSH password")
-    parser.add_argument("--key", help="Path to SSH private key file")
-    parser.add_argument("--type", choices=["basic", "gpu", "dind"], default="basic", help="Type of container to create")
-    parser.add_argument("--image", help="Docker image to use")
+async def main():
+    parser = argparse.ArgumentParser(
+        description="Container Manager Example - Create containers locally or via SSH.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # Execution Mode
+    parser.add_argument(
+        "--local", 
+        action="store_true", 
+        help="Run container operations on the local machine instead of SSH."
+    )
+    
+    # SSH Arguments (required only if --local is not set)
+    ssh_group = parser.add_argument_group('SSH Connection Arguments (if not --local)')
+    ssh_group.add_argument("--host", help="SSH host address.")
+    ssh_group.add_argument("--username", help="SSH username.")
+    ssh_group.add_argument("--password", help="SSH password (use key if possible).")
+    ssh_group.add_argument("--key", help="Path to SSH private key file.")
+
+    # Container Arguments
+    container_group = parser.add_argument_group('Container Configuration')
+    container_group.add_argument(
+        "--type", 
+        choices=["basic", "gpu", "dind"], 
+        default="basic", 
+        help="Type of container configuration profile."
+    )
+    container_group.add_argument("--image", help="Override default Docker image for the chosen type.")
+    container_group.add_argument("--name", help="Specify a custom name for the container.")
+    # Add more args for ports, volumes, env vars if needed, or use a config file approach
     
     args = parser.parse_args()
     
-    if not args.password and not args.key:
-        parser.error("Either --password or --key must be provided")
+    ssh_client: Optional[SSHClient] = None
     
-    if args.type == "basic":
-        image = args.image or "ubuntu:latest"
-        asyncio.run(create_basic_container(args.host, args.username, args.password, args.key, image))
-    elif args.type == "gpu":
-        image = args.image or "nvidia/cuda:11.7.1-base-ubuntu22.04"
-        asyncio.run(create_gpu_container(args.host, args.username, args.password, args.key, image))
-    elif args.type == "dind":
-        image = args.image or "docker:dind"
-        asyncio.run(create_dind_container(args.host, args.username, args.password, args.key, image)) 
+    # Validate arguments based on mode
+    if args.local:
+        logger.info("Running in Local mode.")
+        if args.host or args.username or args.password or args.key:
+             logger.warning("SSH arguments provided with --local flag are ignored.")
+    else:
+        logger.info("Running in SSH mode.")
+        # SSH mode requires host and credentials
+        if not args.host or not args.username:
+            parser.error("--host and --username are required when not using --local.")
+        if not args.password and not args.key:
+            parser.error("Either --password or --key must be provided for SSH connection when not using --local.")
+            
+        # Setup SSH connection
+        try:
+            ssh_client = SSHClient()
+            ssh_client.set_missing_host_key_policy(AutoAddPolicy())
+            logger.info(f"Connecting to SSH host {args.host} as {args.username}...")
+            if args.key:
+                logger.info(f"Using SSH key: {args.key}")
+                ssh_client.connect(args.host, username=args.username, key_filename=args.key, timeout=10)
+            else:
+                logger.info("Using SSH password.")
+                ssh_client.connect(args.host, username=args.username, password=args.password, timeout=10)
+            logger.info("SSH connection successful.")
+        except Exception as e:
+            logger.error(f"Failed to establish SSH connection to {args.host}: {e}", exc_info=True)
+            sys.exit(1)
+    
+    # --- Run the container management task ---
+    try:
+         await manage_container(
+              local=args.local,
+              container_type=args.type,
+              image_name=args.image,
+              ssh_client=ssh_client,
+              setup_user=True
+         )
+    finally:
+         # Close SSH connection if it was opened
+         if ssh_client:
+             logger.info("Closing SSH connection.")
+             ssh_client.close()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Execution interrupted by user.")
+        sys.exit(0) 
