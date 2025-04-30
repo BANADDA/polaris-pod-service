@@ -53,11 +53,8 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 # Set working directory
 WORKDIR /home/pod-user
 
-# DO NOT switch user before entrypoint
-# USER pod-user
-
-# Set the entrypoint (will run as root)
+# Set the entrypoint (will run as root by default now)
 ENTRYPOINT ["/usr/local/bin/dind-entrypoint.sh"]
 
-# Default command (will be passed to the entrypoint, executed as pod-user)
+# Default command (will be passed to the entrypoint, executed as pod-user via gosu)
 CMD ["/bin/bash"] 
