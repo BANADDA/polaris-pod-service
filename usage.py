@@ -76,7 +76,7 @@ def main():
 
     args = parser.parse_args()
 
-    docker_cmd = ["docker", "run", "-d"]
+    docker_cmd = ["docker", "run", "-d", "--privileged"]
 
     image_name = f"mubarakb1999/polaris-pod:{args.type}"
     logger.info(f"Selected image: {image_name}")

@@ -4,7 +4,7 @@ FROM nvidia/cuda:12.1.1-base-ubuntu22.04
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install base dependencies and common tools
+# Install base dependencies, common tools, AND Docker prerequisites
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     mosh \
@@ -14,16 +14,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     net-tools \
     ca-certificates \
+    apt-transport-https \
+    gnupg \
+    lsb-release \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# Add Docker GPG key and repository
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker Engine
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-compose-plugin \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user 'pod-user' with user ID 1000
-# Give passwordless sudo privileges
+# Give passwordless sudo privileges AND add to docker group
 RUN useradd -m -u 1000 -s /bin/bash pod-user && \
     echo "pod-user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/pod-user && \
-    chmod 0440 /etc/sudoers.d/pod-user
+    chmod 0440 /etc/sudoers.d/pod-user && \
+    groupadd docker || true && \
+    usermod -aG docker pod-user
 
-# Ensure NVIDIA libraries are found
+# Copy the entrypoint script and make it executable
+COPY dind-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/dind-entrypoint.sh
+
+# Ensure NVIDIA libraries are found (still relevant for processes inside DinD that might use GPU)
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
@@ -33,5 +55,8 @@ WORKDIR /home/pod-user
 # Switch to the non-root user
 USER pod-user
 
-# Default command to start an interactive bash shell
+# Set the entrypoint
+ENTRYPOINT ["/usr/local/bin/dind-entrypoint.sh"]
+
+# Default command (will be passed to the entrypoint)
 CMD ["/bin/bash"] 

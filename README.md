@@ -30,6 +30,10 @@ The `usage.py` script pulls the appropriate image from Docker Hub and runs it us
     python usage.py --type gpu
     ```
 
+**Important Note (Docker-in-Docker):**
+
+These container images include a full Docker engine installation inside them (Docker-in-Docker). This requires the container to be run with elevated privileges. The `usage.py` script automatically adds the necessary `--privileged` flag to the `docker run` command.
+
 **Common Options:**
 
 The script passes common flags directly to `docker run`:
