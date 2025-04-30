@@ -81,6 +81,18 @@ def main():
     image_name = f"mubarakb1999/polaris-pod:{args.type}"
     logger.info(f"Selected image: {image_name}")
 
+    # --- Pull the latest image --- 
+    try:
+        logger.info(f"Attempting to pull latest image: {image_name}")
+        # We can reuse the run_command function
+        run_command(["docker", "pull", image_name])
+        logger.info(f"Successfully pulled or verified image: {image_name}")
+    except Exception as e:
+        logger.error(f"Failed to pull image {image_name}: {e}")
+        logger.warning("Proceeding with potentially cached image if available.")
+        # Decide if you want to exit here or allow running with cached image
+        # sys.exit(1) # Uncomment to exit if pull fails
+
     if args.type == "gpu":
         docker_cmd.extend(["--gpus", "all"])
 

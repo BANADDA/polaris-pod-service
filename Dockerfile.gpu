@@ -24,12 +24,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-# Install Docker Engine
+# Install Docker Engine AND gosu
 RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-ce \
     docker-ce-cli \
     containerd.io \
     docker-compose-plugin \
+    gosu \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
@@ -52,11 +53,11 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 # Set working directory
 WORKDIR /home/pod-user
 
-# Switch to the non-root user
-USER pod-user
+# DO NOT switch user before entrypoint
+# USER pod-user
 
-# Set the entrypoint
+# Set the entrypoint (will run as root)
 ENTRYPOINT ["/usr/local/bin/dind-entrypoint.sh"]
 
-# Default command (will be passed to the entrypoint)
+# Default command (will be passed to the entrypoint, executed as pod-user)
 CMD ["/bin/bash"] 
